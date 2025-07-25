@@ -1,6 +1,5 @@
 /**
  * Cloudflare Worker for Blinko ICS Calendar Auto Sync
- * 实现自动同步 Blinko Todo 到 ICS 日历
  */
 
 // 生成ICS文件内容
@@ -38,6 +37,111 @@ function generateICSContent(todos: any[], calendarName: string = 'Blinko Todos')
       return date.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
     };
     
+    // 解析 todo 的时间信息
+    // 优先检查 API 返回的 startDate 和 endDate 字段
+    let startTime = created; // 默认使用创建时间
+    let endTime = new Date(created.getTime() + 60 * 60 * 1000); // 默认1小时
+    let timeSource = 'default';
+    
+    // 首先检查 API 返回的时间字段
+    // 检查直接的 startDate/endDate 字段
+    if (todo.startDate) {
+      startTime = new Date(todo.startDate);
+      timeSource = 'api_startDate';
+    }
+    
+    if (todo.endDate) {
+      endTime = new Date(todo.endDate);
+      if (timeSource === 'api_startDate') {
+        timeSource = 'api_both';
+      } else {
+        timeSource = 'api_endDate';
+      }
+    }
+    
+    // 检查 metadata 字段中的时间信息
+    if (todo.metadata && typeof todo.metadata === 'object') {
+      if (todo.metadata.startDate) {
+        startTime = new Date(todo.metadata.startDate);
+        timeSource = timeSource === 'default' ? 'metadata_startDate' : 'metadata_both';
+      }
+      
+      if (todo.metadata.endDate) {
+        endTime = new Date(todo.metadata.endDate);
+        if (timeSource === 'metadata_startDate') {
+          timeSource = 'metadata_both';
+        } else if (timeSource === 'default') {
+          timeSource = 'metadata_endDate';
+        }
+      }
+    }
+    
+    // 如果没有 API 字段，则从内容中解析时间信息
+    if (timeSource === 'default') {
+      // 尝试从内容中解析时间格式，如：
+      // "* [ ] 9:00-10:00 会议"
+      // "* [ ] 2024-01-15 14:00 任务"
+      // "* [ ] 明天10点 开会"
+      
+      // 检查是否有时间范围 (如 9:00-10:00)
+      const timeRangeMatch = rawContent.match(/(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/);
+      if (timeRangeMatch) {
+        const [, startHour, startMin, endHour, endMin] = timeRangeMatch;
+        
+        // 使用创建日期，但修改时间
+        startTime = new Date(created);
+        startTime.setHours(parseInt(startHour), parseInt(startMin), 0, 0);
+        
+        endTime = new Date(created);
+        endTime.setHours(parseInt(endHour), parseInt(endMin), 0, 0);
+        
+        // 如果结束时间小于开始时间，假设是第二天
+        if (endTime <= startTime) {
+          endTime.setDate(endTime.getDate() + 1);
+        }
+        timeSource = 'content_time_range';
+      } else {
+        // 检查是否有单独的时间 (如 14:00)
+        const singleTimeMatch = rawContent.match(/(\d{1,2}):(\d{2})/);
+        if (singleTimeMatch) {
+          const [, hour, min] = singleTimeMatch;
+          
+          startTime = new Date(created);
+          startTime.setHours(parseInt(hour), parseInt(min), 0, 0);
+          
+          // 默认持续1小时
+          endTime = new Date(startTime.getTime() + 60 * 60 * 1000);
+          timeSource = 'content_single_time';
+        } else {
+          // 检查日期时间格式
+          const dateTimeMatch = rawContent.match(/(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})/);
+          if (dateTimeMatch) {
+            const [, year, month, day, hour, min] = dateTimeMatch;
+            
+            startTime = new Date(
+              parseInt(year),
+              parseInt(month) - 1, // 月份从0开始
+              parseInt(day),
+              parseInt(hour),
+              parseInt(min)
+            );
+            
+            // 默认持续1小时
+            endTime = new Date(startTime.getTime() + 60 * 60 * 1000);
+            timeSource = 'content_date_time';
+          }
+        }
+      }
+    }
+    
+    // 确保时间有效且结束时间不早于开始时间
+    if (!startTime || isNaN(startTime.getTime())) {
+      startTime = created;
+    }
+    if (!endTime || isNaN(endTime.getTime()) || endTime <= startTime) {
+      endTime = new Date(startTime.getTime() + 60 * 60 * 1000);
+    }
+    
     // 清理标题 - 移除 Markdown 格式，提取纯文本
     const cleanTitle = rawContent
       .replace(/^\*\s*\[.*?\]\s*/, '') // 移除 "* [ ] " 或 "* [x] " 格式
@@ -63,8 +167,8 @@ function generateICSContent(todos: any[], calendarName: string = 'Blinko Todos')
       'BEGIN:VEVENT',
       `UID:${todoId}@blinko.calendar`,
       `DTSTAMP:${formatDate(now)}`,
-      `DTSTART:${formatDate(created)}`,
-      `DTEND:${formatDate(new Date(created.getTime() + 60 * 60 * 1000))}`,
+      `DTSTART:${formatDate(startTime)}`,
+      `DTEND:${formatDate(endTime)}`,
       `SUMMARY:${finalTitle}`,
       `DESCRIPTION:${cleanDescription}`,
       `CREATED:${formatDate(created)}`,
@@ -287,75 +391,23 @@ async function handleAPIRequest(request: Request, env: any): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
 
-  if (path === '/api/test' && request.method === 'GET') {
-    // 测试端点 - 检查环境变量和API连接
-    try {
-      const testResponse: any = {
-        hasToken: !!env.BLINKO_TOKEN,
-        tokenStart: env.BLINKO_TOKEN ? env.BLINKO_TOKEN.substring(0, 10) + '...' : 'not set',
-        apiBase: env.BLINKO_API_BASE || 'not set',
-        syncInterval: env.SYNC_INTERVAL || 'not set'
-      };
-      
-      // 测试简单的 fetch
-      try {
-        const response = await fetch(`${env.BLINKO_API_BASE}/note/list`, {
-          method: 'POST',
-          headers: {
-            'accept': 'application/json',
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${env.BLINKO_TOKEN}`
-          },
-          body: JSON.stringify({
-            page: 1,
-            size: 5,
-            tagId: null,
-            searchText: '',
-            orderBy: 'desc',
-            type: 2,
-            isArchived: false,
-            isShare: null,
-            isRecycle: false,
-            withoutTag: false,
-            withFile: false,
-            withLink: false,
-            isUseAiQuery: false,
-            startDate: null,
-            endDate: null,
-            hasTodo: true
-          })
-        });
-        
-        testResponse.apiStatus = response.status;
-        testResponse.apiStatusText = response.statusText;
-        
-        if (response.ok) {
-          const data = await response.json();
-          testResponse.dataCount = data.length || 0;
-          testResponse.sampleData = data.slice(0, 1);
-        } else {
-          const errorText = await response.text();
-          testResponse.errorDetails = errorText;
-        }
-      } catch (fetchError) {
-        testResponse.fetchError = fetchError.message;
-      }
-      
-      return new Response(JSON.stringify(testResponse, null, 2), {
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        },
-      });
-    } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
-        status: 500,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        },
-      });
-    }
+  if (path === '/api/status' && request.method === 'GET') {
+    // 基本状态检查
+    const syncResults = await env.KV_NAMESPACE.get('sync-results');
+    const status = syncResults ? JSON.parse(syncResults) : null;
+    
+    return new Response(JSON.stringify({
+      status: 'running',
+      hasToken: !!env.BLINKO_TOKEN,
+      apiBase: env.BLINKO_API_BASE || 'not set',
+      lastSync: status?.lastSync,
+      results: status?.results || []
+    }), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+      },
+    });
   }
 
   if (path === '/api/sync' && request.method === 'POST') {
@@ -385,22 +437,7 @@ async function handleAPIRequest(request: Request, env: any): Promise<Response> {
     }
   }
 
-  if (path === '/api/status' && request.method === 'GET') {
-    // 获取同步状态
-    const syncResults = await env.KV_NAMESPACE.get('sync-results');
-    const status = syncResults ? JSON.parse(syncResults) : null;
-    
-    return new Response(JSON.stringify({
-      status: 'running',
-      lastSync: status?.lastSync,
-      results: status?.results || []
-    }), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-      },
-    });
-  }
+
 
   if (path === '/api/calendars' && request.method === 'GET') {
     // 获取可用的日历文件列表
@@ -425,6 +462,8 @@ async function handleAPIRequest(request: Request, env: any): Promise<Response> {
       },
     });
   }
+
+  
 
   return new Response('Not Found', { status: 404 });
 }
