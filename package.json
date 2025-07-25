@@ -1,0 +1,48 @@
+{
+  "name": "blinko-ics-calendar-worker",
+  "version": "1.0.0",
+  "description": "Blinko Todo to ICS Calendar Sync with Cloudflare Workers",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "build:worker": "echo 'Worker build completed'",
+    "start": "next start",
+    "lint": "next lint",
+    "deploy:worker": "wrangler deploy",
+    "deploy:worker-dev": "wrangler dev",
+    "kv:list": "wrangler kv:key list --binding=KV_NAMESPACE"
+  },
+  "dependencies": {
+    "next": "^14.0.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "autoprefixer": "^10.0.0",
+    "esbuild": "^0.25.8",
+    "postcss": "^8.0.0",
+    "tailwindcss": "^3.0.0",
+    "typescript": "^5.0.0",
+    "wrangler": "^4.26.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "blinko",
+    "todo",
+    "calendar",
+    "ics",
+    "nextjs",
+    "typescript",
+    "cloudflare",
+    "workers",
+    "kv"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
+ 
