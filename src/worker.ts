@@ -2,9 +2,65 @@
  * Cloudflare Worker for Blinko ICS Calendar Auto Sync
  */
 
+// 东八区时间处理工具函数
+class CSTTimeHandler {
+  // 东八区偏移量（8小时，单位毫秒）
+  static CST_OFFSET = 8 * 60 * 60 * 1000;
+  
+  // 创建东八区时间
+  static createCSTTime(year?: number, month?: number, day?: number, hour?: number, minute?: number): Date {
+    const now = new Date();
+    const cstNow = new Date(now.getTime() + CSTTimeHandler.CST_OFFSET);
+    
+    const cstYear = year ?? cstNow.getUTCFullYear();
+    const cstMonth = month ?? cstNow.getUTCMonth();
+    const cstDay = day ?? cstNow.getUTCDate();
+    const cstHour = hour ?? cstNow.getUTCHours();
+    const cstMinute = minute ?? cstNow.getUTCMinutes();
+    
+    // 创建UTC时间，然后减去8小时偏移量来得到正确的UTC时间
+    // 这样当转换为本地时间时，会显示为东八区时间
+    const utcTime = new Date(Date.UTC(cstYear, cstMonth, cstDay, cstHour, cstMinute));
+    return new Date(utcTime.getTime() - CSTTimeHandler.CST_OFFSET);
+  }
+  
+  // 将任意时间转换为东八区时间基准
+  static toCSTTime(date: Date): Date {
+    // 获取当前日期的年月日
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    const day = date.getDate();
+    const hour = date.getHours();
+    const minute = date.getMinutes();
+    
+    // 按东八区处理这个时间
+    return CSTTimeHandler.createCSTTime(year, month, day, hour, minute);
+  }
+  
+  // 解析时间字符串为东八区时间（基于给定日期）
+  static parseTimeInCST(timeString: string, baseDate: Date): Date {
+    const [hour, minute] = timeString.split(':').map(Number);
+    const baseYear = baseDate.getFullYear();
+    const baseMonth = baseDate.getMonth();
+    const baseDay = baseDate.getDate();
+    
+    return CSTTimeHandler.createCSTTime(baseYear, baseMonth, baseDay, hour, minute);
+  }
+  
+  // 解析日期时间字符串为东八区时间
+  static parseDateTimeInCST(year: number, month: number, day: number, hour: number, minute: number): Date {
+    return CSTTimeHandler.createCSTTime(year, month - 1, day, hour, minute); // month - 1 因为Date构造函数月份从0开始
+  }
+  
+  // 获取当前东八区时间
+  static now(): Date {
+    return CSTTimeHandler.createCSTTime();
+  }
+}
+
 // 生成ICS文件内容
 function generateICSContent(todos: any[], calendarName: string = 'Blinko Todos'): string {
-  const now = new Date();
+  const now = CSTTimeHandler.now();
   
   let icsContent = [
     'BEGIN:VCALENDAR',
@@ -29,12 +85,18 @@ function generateICSContent(todos: any[], calendarName: string = 'Blinko Todos')
   todos.forEach((todo, index) => {
     const todoId = todo.id || `todo-${index}`;
     const rawContent = todo.content || 'Untitled Todo';
-    const created = new Date(todo.createdAt || todo.updatedAt || now.toISOString());
-    const updated = new Date(todo.updatedAt || todo.createdAt || now.toISOString());
     
-    // 格式化日期为ICS格式
-    const formatDate = (date: Date) => {
-      return date.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+    // 处理创建时间和更新时间，转换为东八区基准
+    const originalCreated = new Date(todo.createdAt || todo.updatedAt || now.toISOString());
+    const originalUpdated = new Date(todo.updatedAt || todo.createdAt || now.toISOString());
+    const created = CSTTimeHandler.toCSTTime(originalCreated);
+    const updated = CSTTimeHandler.toCSTTime(originalUpdated);
+    
+    // 格式化日期为ICS格式 - 使用带时区信息的格式
+    const formatDateWithTimezone = (date: Date) => {
+      // 为了正确表示东八区时间，我们需要调整到东八区再格式化
+      const cstDate = new Date(date.getTime() + CSTTimeHandler.CST_OFFSET);
+      return cstDate.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
     };
     
     // 解析 todo 的时间信息
@@ -46,12 +108,12 @@ function generateICSContent(todos: any[], calendarName: string = 'Blinko Todos')
     // 首先检查 API 返回的时间字段
     // 检查直接的 startDate/endDate 字段
     if (todo.startDate) {
-      startTime = new Date(todo.startDate);
+      startTime = CSTTimeHandler.toCSTTime(new Date(todo.startDate));
       timeSource = 'api_startDate';
     }
     
     if (todo.endDate) {
-      endTime = new Date(todo.endDate);
+      endTime = CSTTimeHandler.toCSTTime(new Date(todo.endDate));
       if (timeSource === 'api_startDate') {
         timeSource = 'api_both';
       } else {
@@ -62,12 +124,12 @@ function generateICSContent(todos: any[], calendarName: string = 'Blinko Todos')
     // 检查 metadata 字段中的时间信息
     if (todo.metadata && typeof todo.metadata === 'object') {
       if (todo.metadata.startDate) {
-        startTime = new Date(todo.metadata.startDate);
+        startTime = CSTTimeHandler.toCSTTime(new Date(todo.metadata.startDate));
         timeSource = timeSource === 'default' ? 'metadata_startDate' : 'metadata_both';
       }
       
       if (todo.metadata.endDate) {
-        endTime = new Date(todo.metadata.endDate);
+        endTime = CSTTimeHandler.toCSTTime(new Date(todo.metadata.endDate));
         if (timeSource === 'metadata_startDate') {
           timeSource = 'metadata_both';
         } else if (timeSource === 'default') {
@@ -88,16 +150,13 @@ function generateICSContent(todos: any[], calendarName: string = 'Blinko Todos')
       if (timeRangeMatch) {
         const [, startHour, startMin, endHour, endMin] = timeRangeMatch;
         
-        // 使用创建日期，但修改时间
-        startTime = new Date(created);
-        startTime.setHours(parseInt(startHour), parseInt(startMin), 0, 0);
-        
-        endTime = new Date(created);
-        endTime.setHours(parseInt(endHour), parseInt(endMin), 0, 0);
+        // 使用东八区时间解析
+        startTime = CSTTimeHandler.parseTimeInCST(`${startHour}:${startMin}`, created);
+        endTime = CSTTimeHandler.parseTimeInCST(`${endHour}:${endMin}`, created);
         
         // 如果结束时间小于开始时间，假设是第二天
         if (endTime <= startTime) {
-          endTime.setDate(endTime.getDate() + 1);
+          endTime = new Date(endTime.getTime() + 24 * 60 * 60 * 1000);
         }
         timeSource = 'content_time_range';
       } else {
@@ -106,8 +165,8 @@ function generateICSContent(todos: any[], calendarName: string = 'Blinko Todos')
         if (singleTimeMatch) {
           const [, hour, min] = singleTimeMatch;
           
-          startTime = new Date(created);
-          startTime.setHours(parseInt(hour), parseInt(min), 0, 0);
+          // 使用东八区时间解析
+          startTime = CSTTimeHandler.parseTimeInCST(`${hour}:${min}`, created);
           
           // 默认持续1小时
           endTime = new Date(startTime.getTime() + 60 * 60 * 1000);
@@ -118,9 +177,10 @@ function generateICSContent(todos: any[], calendarName: string = 'Blinko Todos')
           if (dateTimeMatch) {
             const [, year, month, day, hour, min] = dateTimeMatch;
             
-            startTime = new Date(
+            // 使用东八区时间解析
+            startTime = CSTTimeHandler.parseDateTimeInCST(
               parseInt(year),
-              parseInt(month) - 1, // 月份从0开始
+              parseInt(month),
               parseInt(day),
               parseInt(hour),
               parseInt(min)
@@ -166,13 +226,13 @@ function generateICSContent(todos: any[], calendarName: string = 'Blinko Todos')
     const event = [
       'BEGIN:VEVENT',
       `UID:${todoId}@blinko.calendar`,
-      `DTSTAMP:${formatDate(now)}`,
-      `DTSTART:${formatDate(startTime)}`,
-      `DTEND:${formatDate(endTime)}`,
+      `DTSTAMP:${formatDateWithTimezone(now)}`,
+      `DTSTART:${formatDateWithTimezone(startTime)}`,
+      `DTEND:${formatDateWithTimezone(endTime)}`,
       `SUMMARY:${finalTitle}`,
-      `DESCRIPTION:${cleanDescription}`,
-      `CREATED:${formatDate(created)}`,
-      `LAST-MODIFIED:${formatDate(updated)}`,
+      `DESCRIPTION:${cleanDescription}\\n\\n时间来源: ${timeSource}\\n创建时间: ${created.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`,
+      `CREATED:${formatDateWithTimezone(created)}`,
+      `LAST-MODIFIED:${formatDateWithTimezone(updated)}`,
       'CLASS:PUBLIC',
       'TRANSP:OPAQUE',
       'END:VEVENT'
